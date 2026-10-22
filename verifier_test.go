@@ -50,4 +50,9 @@ func TestVerifyAcceptsOnlyThisAPIsClients(t *testing.T) {
 	if _, err := personsOnly.Verify(t.Context(), provider.Sign(t, "at+jwt", service)); !errors.Is(err, goapiauth.ErrUnauthorized) {
 		t.Errorf("a service token sent to an API with no service prefix verified as %v, want ErrUnauthorized", err)
 	}
+
+	// A bare product name would admit acmecorp-cli-desk, so no verifier is built.
+	if _, err := goapiauth.NewConnecting(goapiauth.Config{Issuer: "https://auth.example", PersonPrefix: "acme"}); err == nil {
+		t.Error("a Config whose PersonPrefix is a bare product name was accepted")
+	}
 }

@@ -25,15 +25,20 @@ An API that only CLIs and services call:
 ```go
 config := goapiauth.Config{
  Issuer:        "https://auth.example.com",
- PersonPrefix:  goapiauth.PersonPrefix("acme"),  // acme-cli-<host>
- ServicePrefix: goapiauth.ServicePrefix("acme"), // acme-svc-<name>
+ PersonPrefix:  clientid.PersonPrefix("acme"),  // acme-cli-<host>
+ ServicePrefix: clientid.ServicePrefix("acme"), // acme-svc-<name>
 }
-verifier := goapiauth.NewConnecting(config)
+verifier, err := goapiauth.NewConnecting(config)
+if err != nil {
+ return err
+}
 go verifier.Run(ctx, logger)
 
 mux := http.NewServeMux()
-mux.Handle("GET "+goapiauth.ProtectedResourcePath,
- goapiauth.ProtectedResourceMetadata(config.Issuer, "https://acme.example.com"))
+mux.Handle("GET "+goapiauth.ProtectedResourcePath, goapiauth.ProtectedResourceMetadata{
+ Resource: "https://acme.example.com",
+ Issuer:   config.Issuer,
+})
 mux.HandleFunc("GET /api/v1/reports", listReports)
 
 routes := map[string][]string{"acme.read": {"GET /api/v1/reports"}}
@@ -63,54 +68,58 @@ A handler reads who called with `goapiauth.IdentityFrom(r.Context())`.
 | May this service reach this route? | `LimitServices` |
 | Is this caller in a group? | `RequireGroup` |
 | Where does a CLI learn which provider to log in through? | `ProtectedResourceMetadata` |
+| What client id does a product's CLI or service register? | `clientid.PersonPrefix`, `clientid.ServicePrefix` |
 
 ## `Verify` — the client id decides whose token it is
 
 A token is refused unless it is signed with RS256 by a key the provider
 publishes, typed `at+jwt`, from `Config.Issuer` and unexpired. The type check
 keeps out an ID token, which carries the same signature and issuer and is
-handed to the client. The provider leaves the audience claim empty on a device
-grant's token, so the client id's prefix is what keeps a token issued for
-another product out.
+handed to the client. The audience claim is not checked, because some
+providers leave it empty on a device grant's token. The client id's prefix is
+what keeps a token issued for another product out, so `Config` refuses a
+prefix `clientid` could not have built.
 
 A token from a `PersonPrefix` client is a person's and must carry `sub`. One
 from a `ServicePrefix` client is a service's and must carry a non-empty `scp`.
-A missing `sub` cannot decide which a token is. The provider leaves it off a
+A missing `sub` cannot decide which a token is. Some providers leave it off a
 client-credentials token, but RFC 9068 requires one, and a release that added
 it would make a service look like a person. An empty `ServicePrefix` refuses
 every service token.
 
 ## The keys outlive an outage
 
-The keys are read at startup and held. Held keys older than five minutes are
-read again on the next token, which bounds how long a key the provider stopped
-publishing still verifies. When that read fails, a token the held keys verify
-is accepted, because a provider that cannot be read has not rotated them out.
-An API that dropped its keys at a fixed age would refuse every token a few
-minutes into an outage, and every caller would see the API down with it.
+The keys are read at startup and held. Held keys past an age the package doc
+gives are read again, which bounds how long a key the provider stopped
+publishing still verifies. A token they verify is answered without waiting on
+that read. When the read fails they go on verifying, because a provider that
+cannot be read has not rotated them out. An API that dropped its keys at a
+fixed age would refuse every token a few minutes into an outage, and every
+caller would see the API down with it.
 
-A token naming a key the held set lacks makes the Verifier read the keys
-again, which covers a key the provider has just rotated in. Those reads are at
-least 30 seconds apart, so anyone able to reach the API cannot turn a stream of
-forged tokens into a stream of reads.
+A token no held key verifies makes the Verifier read the keys again, which
+covers a key the provider has just rotated in. Those reads are spaced by a
+minimum gap, so anyone able to reach the API cannot turn a stream of forged
+tokens into a stream of reads. Inside the gap after a failed read, such a
+token is refused as the outage it met, never as a bad token.
 
 ## Refusals — one body, and a code to branch on
 
-Every refusal answers `{"error": <status text>, "message": <reason>}`. The
-reason names what is wrong with the request, never which check a token failed.
-A bearer refusal adds a `code`:
+Every refusal answers `{"error": <status text>, "message": <reason>, "code":
+<code>}`. The reason names what is wrong with the request, never which check a
+token failed. The codes are exported as the `Code` constants:
 
 | Status | `code` | When |
 | --- | --- | --- |
-| 401 | `missing_token` | no bearer token |
+| 401 | `missing_token` | no credential |
 | 401 | `invalid_token` | a token the Verifier refused |
 | 503 | `identity_provider_unavailable` | the provider cannot be read, and no held key verifies the token |
 | 403 | `outside_service_scope` | a service outside its scopes |
+| 403 | `outside_group` | a caller outside the group `RequireGroup` names |
+| 403 | `missing_csrf_header` | a session cookie without gobrowserlogin's CSRF header |
+| 503 | `session_store_unavailable` | a session that cannot be read |
 
-A 401 carries the RFC 6750 `WWW-Authenticate: Bearer` challenge. In
-`tokenorsession`, a request with no credential at all is a 401, a session
-cookie without gobrowserlogin's CSRF header is a 403, and a session store that
-cannot be read is a 503.
+A 401 carries the RFC 6750 `WWW-Authenticate: Bearer` challenge.
 
 ## `tokenorsession` — a token never falls through to a session
 
@@ -126,5 +135,5 @@ session, and its Identity carries the session's subject and groups.
   request.
 - **No algorithm other than RS256.** A token naming another is refused before
   any key is tried.
-- **No audience check.** The device grant leaves the claim empty. The client
-  id prefix does that job.
+- **No audience check.** Some providers leave the claim empty on a device
+  grant's token. The client id prefix does that job.

@@ -17,9 +17,14 @@ import (
 func TestTheKeySetUnderForgedTokensAndAProviderOutage(t *testing.T) {
 	issuerKey := rsaKey(t)
 	var reads atomic.Int32
-	var down atomic.Bool
+	var down, hang atomic.Bool
+	release := make(chan struct{})
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if down.Load() {
+		switch {
+		case hang.Load():
+			<-release
+			return
+		case down.Load():
 			http.Error(w, "down", http.StatusBadGateway)
 			return
 		}
@@ -29,10 +34,11 @@ func TestTheKeySetUnderForgedTokensAndAProviderOutage(t *testing.T) {
 		}})
 	}))
 	t.Cleanup(provider.Close)
+	t.Cleanup(func() { close(release) })
 
 	keys := &keySet{uri: provider.URL, client: provider.Client()}
 	start := time.Now()
-	if _, err := keys.fetch(start); err != nil {
+	if _, err := keys.fetch(t.Context(), start); err != nil {
 		t.Fatal(err)
 	}
 	valid := signedWith(t, issuerKey)
@@ -51,12 +57,31 @@ func TestTheKeySetUnderForgedTokensAndAProviderOutage(t *testing.T) {
 		}
 	})
 
-	t.Run("a valid token verifies through a provider outage", func(t *testing.T) {
+	t.Run("through a provider outage a held key's token verifies and any other meets the outage", func(t *testing.T) {
 		down.Store(true)
 		t.Cleanup(func() { down.Store(false) })
 		long := start.Add(keySetLifespan + time.Hour)
 		if _, err := keys.verify(t.Context(), valid, long); err != nil {
 			t.Errorf("a valid token an hour into an outage answered %v, want it verified by the held keys", err)
+		}
+		// A token from a key rotated in before the outage looks like this one.
+		// A 401 would send its caller to log in again, which cannot help.
+		for _, at := range []time.Time{long.Add(time.Second), long.Add(keyRereadGap - time.Second)} {
+			if _, err := keys.verify(t.Context(), forged, at); !errors.Is(err, ErrProviderUnavailable) {
+				t.Errorf("a token no held key verifies, %s after the failed read, answered %v, want ErrProviderUnavailable", at.Sub(long), err)
+			}
+		}
+	})
+
+	t.Run("a provider that hangs holds back no token the held keys verify", func(t *testing.T) {
+		hang.Store(true)
+		later := start.Add(2*keySetLifespan + 2*time.Hour)
+		began := time.Now()
+		if _, err := keys.verify(t.Context(), valid, later); err != nil {
+			t.Errorf("a valid token against a hanging provider answered %v, want it verified by the held keys", err)
+		}
+		if waited := time.Since(began); waited > time.Second {
+			t.Errorf("a valid token waited %s on a provider that hangs, want an answer from the held keys at once", waited)
 		}
 	})
 }

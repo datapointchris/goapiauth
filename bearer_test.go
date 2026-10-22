@@ -52,7 +52,11 @@ var whoami = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 func TestRequireBearerAnswersEachTokenWithWhatFixesIt(t *testing.T) {
 	provider := authtest.NewProvider(t)
 	verified := goapiauth.RequireBearer(provider.Verifier(t, "acme-cli-", ""), slog.Default(), "/health")(whoami)
-	unread := goapiauth.RequireBearer(goapiauth.NewConnecting(goapiauth.Config{Issuer: provider.URL, PersonPrefix: "acme-cli-"}), slog.Default())(whoami)
+	connecting, err := goapiauth.NewConnecting(goapiauth.Config{Issuer: provider.URL, PersonPrefix: "acme-cli-"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unread := goapiauth.RequireBearer(connecting, slog.Default())(whoami)
 
 	for name, tc := range map[string]struct {
 		handler       http.Handler
@@ -127,12 +131,13 @@ func TestTheMetadataNamesTheResourceAClientFetchedItFor(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://desk:7373"+goapiauth.ProtectedResourcePath, http.NoBody)
 			rec := httptest.NewRecorder()
-			goapiauth.ProtectedResourceMetadata("https://auth.example.com", tc.resource).ServeHTTP(rec, req)
+			goapiauth.ProtectedResourceMetadata{Resource: tc.resource, Issuer: "https://auth.example.com"}.ServeHTTP(rec, req)
 			var doc struct {
 				Resource string   `json:"resource"`
 				Servers  []string `json:"authorization_servers"`
 			}
-			if err := json.NewDecoder(rec.Body).Decode(&doc); err != nil || doc.Resource != tc.want || len(doc.Servers) != 1 {
+			err := json.NewDecoder(rec.Body).Decode(&doc)
+			if err != nil || doc.Resource != tc.want || len(doc.Servers) != 1 || doc.Servers[0] != "https://auth.example.com" {
 				t.Errorf("the document = %+v, %v; want resource %s and the issuer", doc, err, tc.want)
 			}
 		})

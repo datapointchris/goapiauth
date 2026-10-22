@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/datapointchris/goapiauth/internal/publicpath"
 	"github.com/datapointchris/goapiauth/internal/refusal"
 )
 
@@ -26,20 +27,20 @@ type contextKey struct{}
 //
 // A missing or rejected token is a 401 carrying the RFC 6750 Bearer
 // challenge, and a provider that cannot be read is a 503. Each is logged with
-// its reason, which the body does not carry. A request whose caller went away
-// before its token was verified gets no answer.
+// its reason, which the body does not carry. A request whose context ended
+// before its token was verified is a 503 too: a deadline the API set ends it
+// as surely as a caller leaving, and that caller is still waiting.
 func RequireBearer(verifier TokenVerifier, log *slog.Logger, public ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if isPublic(r, public) {
+			if publicpath.Admits(r.URL.Path, public) {
 				next.ServeHTTP(w, r)
 				return
 			}
 			ctx := r.Context()
 			raw := BearerToken(r.Header.Get("Authorization"))
 			if raw == "" {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				refusal.Write(w, http.StatusUnauthorized, refusal.MissingToken, "the request carries no bearer token")
+				refusal.Unauthorized(w, "", CodeMissingToken, "the request carries no bearer token")
 				return
 			}
 			identity, err := verifier.Verify(ctx, raw)
@@ -48,21 +49,18 @@ func RequireBearer(verifier TokenVerifier, log *slog.Logger, public ...string) f
 				next.ServeHTTP(w, r.WithContext(WithIdentity(ctx, identity)))
 			case ctx.Err() != nil:
 				log.InfoContext(ctx, "request ended before its token was verified", "err", err, "path", r.URL.Path)
+				refusal.Write(w, http.StatusServiceUnavailable, CodeIdentityProviderUnavailable,
+					"the request ended before its token was verified")
 			case errors.Is(err, ErrProviderUnavailable):
 				log.ErrorContext(ctx, "identity provider unavailable", "err", err, "path", r.URL.Path)
-				refusal.Write(w, http.StatusServiceUnavailable, refusal.IdentityProviderUnavailable,
+				refusal.Write(w, http.StatusServiceUnavailable, CodeIdentityProviderUnavailable,
 					"the identity provider is unavailable, so no token can be verified")
 			default:
 				log.WarnContext(ctx, "bearer token rejected", "err", err, "path", r.URL.Path)
-				w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-				refusal.Write(w, http.StatusUnauthorized, refusal.InvalidToken, "the bearer token is not valid")
+				refusal.Unauthorized(w, "invalid_token", CodeInvalidToken, "the bearer token is not valid")
 			}
 		})
 	}
-}
-
-func isPublic(r *http.Request, public []string) bool {
-	return r.URL.Path == ProtectedResourcePath || slices.Contains(public, r.URL.Path)
 }
 
 // WithIdentity is ctx carrying identity, as RequireBearer leaves it. A
@@ -94,7 +92,7 @@ func RequireGroup(group string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, _ := IdentityFrom(r.Context())
 		if !slices.Contains(identity.Groups, group) {
-			refusal.Write(w, http.StatusForbidden, "", "this needs membership in the "+group+" group")
+			refusal.Write(w, http.StatusForbidden, CodeOutsideGroup, "this needs membership in the "+group+" group")
 			return
 		}
 		next.ServeHTTP(w, r)

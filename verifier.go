@@ -13,6 +13,8 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/datapointchris/goapiauth/clientid"
 )
 
 // ErrUnauthorized is returned for every rejected token. The reason is wrapped
@@ -56,31 +58,40 @@ type Config struct {
 	Issuer string
 
 	// PersonPrefix starts the client id of every person's CLI the API accepts:
-	// PersonPrefix("acme") for acme-cli-<host>. The device authorization grant
-	// leaves the audience claim empty, so the prefix is what keeps a token
-	// issued to another product's CLI out.
+	// clientid.PersonPrefix("acme") for acme-cli-<host>. The audience claim is
+	// not checked, so the prefix is what keeps a token issued to another
+	// product's CLI out.
 	PersonPrefix string
 
 	// ServicePrefix starts the client id of every client-credentials client the
-	// API accepts: ServicePrefix("acme") for acme-svc-<name>. Empty refuses
-	// every service token.
+	// API accepts: clientid.ServicePrefix("acme") for acme-svc-<name>. Empty
+	// refuses every service token.
 	ServicePrefix string
 }
 
-// PersonPrefix is the client id prefix of product's CLI clients.
-func PersonPrefix(product string) string { return product + "-cli-" }
-
-// ServicePrefix is the client id prefix of product's service clients.
-func ServicePrefix(product string) string { return product + "-svc-" }
-
+// check refuses a prefix clientid could not have built. A bare product name
+// would admit every client id it starts: acme admits acmecorp-cli-desk.
 func (c Config) check() error {
-	if c.Issuer == "" || c.PersonPrefix == "" {
-		return errors.New("goapiauth: Config needs an Issuer and a PersonPrefix")
+	if c.Issuer == "" {
+		return errors.New("goapiauth: Config needs an Issuer")
+	}
+	if !builtBy(c.PersonPrefix, clientid.PersonPrefix) {
+		return fmt.Errorf("goapiauth: PersonPrefix %q is not clientid.PersonPrefix(product) for any product", c.PersonPrefix)
+	}
+	if c.ServicePrefix != "" && !builtBy(c.ServicePrefix, clientid.ServicePrefix) {
+		return fmt.Errorf("goapiauth: ServicePrefix %q is not clientid.ServicePrefix(product) for any product", c.ServicePrefix)
 	}
 	if c.ServicePrefix != "" && (strings.HasPrefix(c.PersonPrefix, c.ServicePrefix) || strings.HasPrefix(c.ServicePrefix, c.PersonPrefix)) {
 		return fmt.Errorf("goapiauth: client prefixes %q and %q overlap", c.PersonPrefix, c.ServicePrefix)
 	}
 	return nil
+}
+
+// builtBy reports whether prefix is build(product) for a product that is not
+// empty.
+func builtBy(prefix string, build func(product string) string) bool {
+	product, ok := strings.CutSuffix(prefix, build(""))
+	return ok && product != ""
 }
 
 // Identity is what a verified token or a browser session establishes about the
@@ -150,7 +161,7 @@ func NewVerifier(ctx context.Context, config Config) (*Verifier, error) {
 		return nil, fmt.Errorf("goapiauth: issuer %q advertises no jwks_uri", config.Issuer)
 	}
 	keys := &keySet{uri: doc.JWKSURI, client: identifiedClient()}
-	if _, err := keys.fetch(time.Now()); err != nil {
+	if _, err := keys.fetch(ctx, time.Now()); err != nil {
 		return nil, err
 	}
 	return &Verifier{config: config, keys: keys, now: time.Now}, nil
@@ -198,7 +209,7 @@ type accessTokenClaims struct {
 // ctx ending while the keys are read returns ctx's own error.
 //
 // A person's token must carry a subject. A service's must carry scopes. A
-// missing subject cannot decide which a token is: the provider leaves sub off
+// missing subject cannot decide which a token is: some providers leave sub off
 // a client-credentials token, but RFC 9068 requires one, and a release that
 // adds it would make a service look like a person. So the client id decides.
 func (v *Verifier) Verify(ctx context.Context, raw string) (Identity, error) {
@@ -236,8 +247,8 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Identity, error) {
 	}
 }
 
-// serviceScopes is scp as the provider sends it to a service client: a list of
-// at least one non-empty string. A request that named no scope gets `[]`.
+// serviceScopes is scp as a service client's token must carry it: a list of at
+// least one non-empty string. An empty or missing scp is refused.
 func serviceScopes(raw json.RawMessage) ([]string, error) {
 	var scopes []string
 	if err := json.Unmarshal(raw, &scopes); err != nil {
@@ -282,53 +293,71 @@ type keySet struct {
 	keys  []jose.JSONWebKey
 	read  time.Time
 	tried time.Time
+
+	// failed is the last read's error, nil once a read succeeds. Inside the
+	// gap after a failed read, a token no held key verifies may be signed by a
+	// key the provider rotated in, so it is refused as the outage it met.
+	failed error
 }
 
+// verify is the payload of signed as the provider's keys verify it. A token
+// the held keys verify is answered from them at once. Held keys past
+// keySetLifespan also start a read the token does not wait on, because a
+// provider that cannot be read has not rotated them out. A token they do not
+// verify waits on a read.
 func (s *keySet) verify(ctx context.Context, signed *jose.JSONWebSignature, now time.Time) ([]byte, error) {
 	s.mu.Lock()
-	held, read, tried := s.keys, s.read, s.tried
+	held, read, tried, failed := s.keys, s.read, s.tried, s.failed
 	s.mu.Unlock()
 
-	payload, verified := verifyWith(held, signed)
+	rereadDue := now.Sub(tried) >= keyRereadGap
+	if payload, ok := verifyWith(held, signed); ok {
+		if rereadDue && now.Sub(read) >= keySetLifespan {
+			s.refresh(now)
+		}
+		return payload, nil
+	}
 	switch {
-	case verified && now.Sub(read) < keySetLifespan:
-		return payload, nil
-	case now.Sub(tried) < keyRereadGap && verified:
-		return payload, nil
-	case now.Sub(tried) < keyRereadGap:
+	case !rereadDue && failed != nil:
+		return nil, failed
+	case !rereadDue:
 		return nil, fmt.Errorf("%w: no key the provider publishes verifies the signature", ErrUnauthorized)
 	}
 
 	keys, err := s.reread(ctx, now)
-	switch {
-	case err == nil:
-		if payload, ok := verifyWith(keys, signed); ok {
-			return payload, nil
-		}
-		return nil, fmt.Errorf("%w: no key the provider publishes verifies the signature", ErrUnauthorized)
-	case verified:
-		// The keys the provider last published still verify the token, and a
-		// provider that cannot be read has not rotated them out.
-		return payload, nil
-	default:
+	if err != nil {
 		return nil, err
 	}
+	if payload, ok := verifyWith(keys, signed); ok {
+		return payload, nil
+	}
+	return nil, fmt.Errorf("%w: no key the provider publishes verifies the signature", ErrUnauthorized)
 }
 
-// reread reads the keys again, sharing one read among the callers waiting on
-// it. ctx ending returns ctx's own error and leaves the read running for the
-// rest.
-func (s *keySet) reread(ctx context.Context, now time.Time) ([]jose.JSONWebKey, error) {
-	read := s.fetches.DoChan("keys", func() (any, error) {
+// refresh starts a read of the keys, or joins the one running, and returns
+// where its result arrives. The read runs on a deadline of its own rather than
+// a caller's, since every caller waiting shares it and any of them can stop
+// waiting.
+func (s *keySet) refresh(now time.Time) <-chan singleflight.Result {
+	return s.fetches.DoChan("keys", func() (any, error) {
 		s.mu.Lock()
 		s.tried = now
 		s.mu.Unlock()
-		return s.fetch(now)
+		keys, err := s.fetch(context.Background(), now)
+		s.mu.Lock()
+		s.failed = err
+		s.mu.Unlock()
+		return keys, err
 	})
+}
+
+// reread waits on refresh. ctx ending returns ctx's own error and leaves the
+// read running for the rest.
+func (s *keySet) reread(ctx context.Context, now time.Time) ([]jose.JSONWebKey, error) {
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("goapiauth: read the provider's keys: %w", ctx.Err())
-	case result := <-read:
+	case result := <-s.refresh(now):
 		if result.Err != nil {
 			return nil, result.Err
 		}
@@ -336,12 +365,10 @@ func (s *keySet) reread(ctx context.Context, now time.Time) ([]jose.JSONWebKey, 
 	}
 }
 
-// fetch reads the keys the provider publishes and holds them. It runs on a
-// deadline of its own rather than a caller's, since every caller waiting
-// shares it and any of them can stop waiting. now is when the keys count as
-// read.
-func (s *keySet) fetch(now time.Time) ([]jose.JSONWebKey, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), providerTimeout)
+// fetch reads the keys the provider publishes and holds them, giving up at
+// providerTimeout or when ctx ends. now is when the keys count as read.
+func (s *keySet) fetch(ctx context.Context, now time.Time) ([]jose.JSONWebKey, error) {
+	ctx, cancel := context.WithTimeout(ctx, providerTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.uri, http.NoBody)

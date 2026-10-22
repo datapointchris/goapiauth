@@ -22,13 +22,17 @@ type Connecting struct {
 	failure  atomic.Pointer[error]
 }
 
-// NewConnecting is a Connecting for config. Run starts it.
-func NewConnecting(config Config) *Connecting {
-	return &Connecting{config: config, firstRetry: time.Second, lastRetry: time.Minute}
+// NewConnecting is a Connecting for config, which it checks as NewVerifier
+// does. Run starts it.
+func NewConnecting(config Config) (*Connecting, error) {
+	if err := config.check(); err != nil {
+		return nil, err
+	}
+	return &Connecting{config: config, firstRetry: time.Second, lastRetry: time.Minute}, nil
 }
 
 // Run builds the Verifier, retrying after each failure with a wait that
-// doubles from a second to a minute, until it succeeds or ctx ends. A
+// doubles from firstRetry to lastRetry, until it succeeds or ctx ends. A
 // discovery document naming another issuer is retried too, because a provider
 // still starting can serve one, and every retry is logged.
 func (c *Connecting) Run(ctx context.Context, log *slog.Logger) {

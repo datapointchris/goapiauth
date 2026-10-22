@@ -7,23 +7,21 @@ import (
 	"net/http"
 )
 
-// The codes a bearer-token refusal carries beside its message, for a client
-// that branches on why it was refused.
-const (
-	MissingToken                = "missing_token"
-	InvalidToken                = "invalid_token"
-	OutsideServiceScope         = "outside_service_scope"
-	IdentityProviderUnavailable = "identity_provider_unavailable"
-)
-
-// Write answers status with {"error": its status text, "message": message},
-// and code beside them where it is not empty.
+// Write answers status with {"error": its status text, "message": message,
+// "code": code}.
 func Write(w http.ResponseWriter, status int, code, message string) {
-	body := map[string]string{"error": http.StatusText(status), "message": message}
-	if code != "" {
-		body["code"] = code
-	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": http.StatusText(status), "message": message, "code": code})
+}
+
+// Unauthorized answers 401 with the RFC 6750 Bearer challenge, naming
+// bearerError in it where that is not empty, and the body Write gives it.
+func Unauthorized(w http.ResponseWriter, bearerError, code, message string) {
+	challenge := "Bearer"
+	if bearerError != "" {
+		challenge += ` error="` + bearerError + `"`
+	}
+	w.Header().Set("WWW-Authenticate", challenge)
+	Write(w, http.StatusUnauthorized, code, message)
 }

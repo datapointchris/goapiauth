@@ -33,7 +33,7 @@ func LimitServices(mux *http.ServeMux, routes map[string][]string, log *slog.Log
 			}
 		}
 		log.WarnContext(r.Context(), "service client outside its scopes", "client_id", identity.ClientID, "scopes", identity.Scopes, "pattern", pattern, "path", r.URL.Path)
-		refusal.Write(w, http.StatusForbidden, refusal.OutsideServiceScope,
+		refusal.Write(w, http.StatusForbidden, CodeOutsideServiceScope,
 			fmt.Sprintf("client %s may not reach %s %s: %s", identity.ClientID, r.Method, r.URL.Path, reachable(routes, identity.Scopes)))
 	})
 }

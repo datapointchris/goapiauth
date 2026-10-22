@@ -12,11 +12,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"slices"
 
 	"github.com/datapointchris/gobrowserlogin"
 
 	"github.com/datapointchris/goapiauth"
+	"github.com/datapointchris/goapiauth/internal/publicpath"
 	"github.com/datapointchris/goapiauth/internal/refusal"
 )
 
@@ -33,14 +33,15 @@ type Sessions interface {
 // goapiauth.ProtectedResourcePath, passes with neither: the browser login's
 // routes are reached before a session exists.
 //
-// A bearer request is answered as goapiauth.RequireBearer answers it. A
-// request with no credential at all is a 401, a session cookie without the
-// CSRF header is a 403, and a session store that cannot be read is a 503.
+// A bearer request is answered as goapiauth.RequireBearer answers it, and
+// every refusal carries one of goapiauth's codes. A request with no credential
+// at all is a 401, a session cookie without the CSRF header is a 403, and a
+// session store that cannot be read is a 503.
 func Require(verifier goapiauth.TokenVerifier, sessions Sessions, log *slog.Logger, public ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		bearer := goapiauth.RequireBearer(verifier, log)(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == goapiauth.ProtectedResourcePath || slices.Contains(public, r.URL.Path) {
+			if publicpath.Admits(r.URL.Path, public) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -51,13 +52,17 @@ func Require(verifier goapiauth.TokenVerifier, sessions Sessions, log *slog.Logg
 			identity, err := sessions.Authenticate(r)
 			switch {
 			case errors.Is(err, gobrowserlogin.ErrNoSession):
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				refusal.Write(w, http.StatusUnauthorized, "", "the request carries no credential this API accepts")
+				refusal.Unauthorized(w, "", goapiauth.CodeMissingToken, "the request carries no credential this API accepts")
 			case errors.Is(err, gobrowserlogin.ErrNoCSRFHeader):
-				refusal.Write(w, http.StatusForbidden, "", "a request carrying the session cookie must send the "+gobrowserlogin.CSRFHeader+" header")
+				refusal.Write(w, http.StatusForbidden, goapiauth.CodeMissingCSRFHeader,
+					"a request carrying the session cookie must send the "+gobrowserlogin.CSRFHeader+" header")
+			case r.Context().Err() != nil:
+				log.InfoContext(r.Context(), "request ended before its session was read", "err", err, "path", r.URL.Path)
+				refusal.Write(w, http.StatusServiceUnavailable, goapiauth.CodeSessionStoreUnavailable,
+					"the request ended before its session was read")
 			case err != nil:
 				log.ErrorContext(r.Context(), "session store unavailable", "err", err, "path", r.URL.Path)
-				refusal.Write(w, http.StatusServiceUnavailable, "", "the session store is unavailable")
+				refusal.Write(w, http.StatusServiceUnavailable, goapiauth.CodeSessionStoreUnavailable, "the session store is unavailable")
 			default:
 				caller := goapiauth.Identity{Subject: identity.Subject, Groups: identity.Groups}
 				next.ServeHTTP(w, r.WithContext(goapiauth.WithIdentity(r.Context(), caller)))
