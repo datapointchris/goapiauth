@@ -9,6 +9,44 @@ Written to be used by strangers. Treat the exported API, the README and the
 godoc as the product. A change that suits the internal consumers is not
 automatically right.
 
+## Layout
+
+| Path | Holds |
+| --- | --- |
+| `doc.go` | Package doc: what a token must be, and why the keys outlive an outage |
+| `verifier.go` | `Config`, `Identity`, `Verifier`, and the held key set |
+| `connecting.go` | `Connecting`: a verifier that starts before the provider answers |
+| `bearer.go` | `RequireBearer`, `RequireGroup`, and the identity on the context |
+| `services.go` | `LimitServices`: a service kept to the routes its scopes list |
+| `protected_resource.go` | The RFC 9728 metadata a CLI logs in from |
+| `refusal_codes.go` | The `code` every refusal carries, which clients branch on |
+| `clientid/` | The client id prefixes, imported by the CLI login library too, so it imports nothing |
+| `internal/refusal/` | The one refusal body and the 401 challenge |
+| `internal/publicpath/` | Which paths pass both middlewares with no credential |
+| `tokenorsession/` | A bearer token or a gobrowserlogin session; the only importer of gobrowserlogin |
+| `authtest/` | A stand-in provider for a consumer's tests |
+
+## Constraints that must not regress
+
+- **Held keys verify through an outage, and never wait on it.** A failed
+  re-read never discards them, and a token they verify is answered before the
+  re-read returns. `TestTheKeySetUnderForgedTokensAndAProviderOutage` holds
+  both cases, and the one-read-per-gap case beside them.
+- **An empty `ServicePrefix` refuses every service token.** Every string has
+  the empty prefix, so an unguarded check reads every client as a service.
+  `TestVerifyAcceptsOnlyThisAPIsClients` fails without the guard.
+- **A bearer credential never falls through to a session.**
+  `TestRequireAdmitsATokenOrASessionAndNeverPairsThem` fails if it does.
+- **The client id decides person or service, never the presence of `sub`.**
+- **Each dependency earns its place.** This is the credential path.
+  - `github.com/go-jose/go-jose` parses and verifies the signed token.
+  - `golang.org/x/sync` shares one key read among the requests waiting on it.
+  - `github.com/datapointchris/gobrowserlogin` is imported by
+    `tokenorsession` alone.
+
+  The verifier reaches the network only to read the issuer's discovery
+  document and its key set, on a client with a timeout of its own.
+
 ## Never write the breaking-change trailer in a commit message
 
 Those two words anywhere in a message cut a major once this repo is past 0.x.
