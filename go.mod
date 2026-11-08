@@ -1,6 +1,6 @@
 module github.com/datapointchris/goapiauth
 
-go 1.26.5
+go 1.26.8
 
 toolchain go1.26.10
 
