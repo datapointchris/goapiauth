@@ -2,7 +2,7 @@ module github.com/datapointchris/goapiauth
 
 go 1.26.8
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/datapointchris/gobrowserlogin v0.1.1
