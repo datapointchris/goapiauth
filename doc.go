@@ -14,13 +14,13 @@
 //
 // The keys are read once and held. A token no held key verifies makes the
 // Verifier read them again, which covers a key the provider has just rotated
-// in. Those reads are at least 30 seconds apart, so a stream of forged tokens
-// costs the provider one read per gap. Held keys older than five minutes are
-// read again too, which bounds how long a key the provider stopped publishing
-// still verifies. A token they verify is answered from them without waiting on
-// that read, and when the read fails they go on verifying. An outage of the
-// provider does not become an outage of the API, because a provider that
-// cannot be read has not rotated its keys out.
+// in. Those reads are at least keyRereadGap apart, in verifier.go, so a stream
+// of forged tokens costs the provider one read per gap. Held keys older than
+// keySetLifespan, beside it, are read again too, which bounds how long a key
+// the provider stopped publishing still verifies. A token they verify is
+// answered from them without waiting on that read, and when the read fails they
+// go on verifying. An outage of the provider does not become an outage of the
+// API, because a provider that cannot be read has not rotated its keys out.
 //
 // # Requests
 //
