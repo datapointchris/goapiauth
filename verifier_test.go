@@ -56,3 +56,15 @@ func TestVerifyAcceptsOnlyThisAPIsClients(t *testing.T) {
 		t.Error("a Config whose PersonPrefix is a bare product name was accepted")
 	}
 }
+
+// An issuer configured with a trailing slash reaches the provider's discovery
+// document, but every token names the issuer without it. A Verifier built on it
+// would refuse every token, so none is built, and the error is a
+// misconfiguration rather than a provider that is down.
+func TestNewVerifierRefusesAnIssuerTheDiscoveryDocumentDoesNotName(t *testing.T) {
+	provider := authtest.NewProvider(t)
+	_, err := goapiauth.NewVerifier(t.Context(), goapiauth.Config{Issuer: provider.URL + "/", PersonPrefix: "acme-cli-"})
+	if err == nil || errors.Is(err, goapiauth.ErrProviderUnavailable) {
+		t.Errorf("an issuer the document does not name built a Verifier or read as unavailable: %v", err)
+	}
+}
