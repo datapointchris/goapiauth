@@ -1,7 +1,9 @@
 package goapiauth_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +51,25 @@ var whoami = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(identity.Subject + identity.ClientID))
 })
 
+// readEnded fails as a key read does when the request's context ends while it
+// waits: with the context's error, which is neither ErrUnauthorized nor
+// ErrProviderUnavailable.
+type readEnded struct{}
+
+func (readEnded) Verify(ctx context.Context, _ string) (goapiauth.Identity, error) {
+	return goapiauth.Identity{}, fmt.Errorf("goapiauth: read the provider's keys: %w", ctx.Err())
+}
+
+// ended serves each request to next with its context already ended, as a
+// deadline the API set ends it.
+func ended(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithCancel(r.Context())
+		cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func TestRequireBearerAnswersEachTokenWithWhatFixesIt(t *testing.T) {
 	provider := authtest.NewProvider(t)
 	verified := goapiauth.RequireBearer(provider.Verifier(t, "acme-cli-", ""), slog.Default(), "/health")(whoami)
@@ -57,6 +78,7 @@ func TestRequireBearerAnswersEachTokenWithWhatFixesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	unread := goapiauth.RequireBearer(connecting, slog.Default())(whoami)
+	cut := ended(goapiauth.RequireBearer(readEnded{}, slog.Default())(whoami))
 
 	for name, tc := range map[string]struct {
 		handler       http.Handler
@@ -69,6 +91,7 @@ func TestRequireBearerAnswersEachTokenWithWhatFixesIt(t *testing.T) {
 		"another scheme":              {verified, "/api", "Basic Y2hyaXM6eA==", 401, "missing_token", "Bearer"},
 		"a bad token":                 {verified, "/api", "Bearer not.a.token", 401, "invalid_token", `Bearer error="invalid_token"`},
 		"a provider not yet read":     {unread, "/api", "Bearer " + provider.Person(t, "acme-cli-desk", "chris"), 503, "identity_provider_unavailable", ""},
+		"a request ended mid-read":    {cut, "/api", "Bearer " + provider.Person(t, "acme-cli-desk", "chris"), 503, "identity_provider_unavailable", ""},
 		"a public path with no token": {verified, "/health", "", 200, "", ""},
 		"the metadata with no token":  {verified, goapiauth.ProtectedResourcePath, "", 200, "", ""},
 	} {
