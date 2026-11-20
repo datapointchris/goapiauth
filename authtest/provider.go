@@ -62,9 +62,11 @@ func NewProvider(t testing.TB) *Provider {
 		}}})
 	})
 	mux.HandleFunc("POST /token", p.grant)
-	server := httptest.NewServer(mux)
+	// URL is written before Start, because the discovery handler reads it.
+	server := httptest.NewUnstartedServer(mux)
+	p.URL = "http://" + server.Listener.Addr().String()
+	server.Start()
 	t.Cleanup(server.Close)
-	p.URL = server.URL
 	return p
 }
 
