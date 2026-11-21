@@ -100,6 +100,11 @@ type Identity struct {
 	// Subject is the person. A service's token carries none.
 	Subject string
 
+	// Username is the person's preferred_username: a token's claim, where the
+	// provider's policy for the client copies it into the access token, or the
+	// one a gobrowserlogin session holds. Empty where neither carries it.
+	Username string
+
 	// ClientID is the client the token was issued to. A session carries none.
 	ClientID string
 
@@ -194,6 +199,7 @@ func readDiscovery(ctx context.Context, issuer string) (discoveryDocument, error
 type accessTokenClaims struct {
 	Issuer   string   `json:"iss"`
 	Subject  string   `json:"sub"`
+	Username string   `json:"preferred_username"`
 	ClientID string   `json:"client_id"`
 	Expiry   int64    `json:"exp"`
 	Groups   []string `json:"groups"`
@@ -235,7 +241,7 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Identity, error) {
 		if claims.Subject == "" {
 			return Identity{}, fmt.Errorf("%w: no subject", ErrUnauthorized)
 		}
-		return Identity{Subject: claims.Subject, ClientID: claims.ClientID, Groups: claims.Groups}, nil
+		return Identity{Subject: claims.Subject, Username: claims.Username, ClientID: claims.ClientID, Groups: claims.Groups}, nil
 	case v.config.ServicePrefix != "" && strings.HasPrefix(claims.ClientID, v.config.ServicePrefix):
 		scopes, err := serviceScopes(claims.Scopes)
 		if err != nil {

@@ -64,7 +64,7 @@ func Require(verifier goapiauth.TokenVerifier, sessions Sessions, log *slog.Logg
 				log.ErrorContext(r.Context(), "session store unavailable", "err", err, "path", r.URL.Path)
 				refusal.Write(w, http.StatusServiceUnavailable, goapiauth.CodeSessionStoreUnavailable, "the session store is unavailable")
 			default:
-				caller := goapiauth.Identity{Subject: identity.Subject, Groups: identity.Groups}
+				caller := goapiauth.Identity{Subject: identity.Subject, Username: identity.Username, Groups: identity.Groups}
 				next.ServeHTTP(w, r.WithContext(goapiauth.WithIdentity(r.Context(), caller)))
 			}
 		})

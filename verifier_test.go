@@ -22,10 +22,10 @@ func TestVerifyAcceptsOnlyThisAPIsClients(t *testing.T) {
 	}
 
 	person, err := verifier.Verify(t.Context(), provider.Sign(t, "at+jwt", map[string]any{
-		"client_id": "acme-cli-desk", "sub": "chris", "groups": []string{"admin"},
+		"client_id": "acme-cli-desk", "sub": "0258be50", "preferred_username": "chris", "groups": []string{"admin"},
 	}))
-	if err != nil || person.Service || person.Subject != "chris" || !slices.Equal(person.Groups, []string{"admin"}) {
-		t.Errorf("a person's token = %+v, %v; want chris in admin, not a service", person, err)
+	if err != nil || person.Service || person.Subject != "0258be50" || person.Username != "chris" || !slices.Equal(person.Groups, []string{"admin"}) {
+		t.Errorf("a person's token = %+v, %v; want 0258be50, named chris, in admin, not a service", person, err)
 	}
 	svc, err := verifier.Verify(t.Context(), provider.Sign(t, "at+jwt", service))
 	if err != nil || !svc.Service || !slices.Equal(svc.Scopes, []string{"acme.report"}) {
